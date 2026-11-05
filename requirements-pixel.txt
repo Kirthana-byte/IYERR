@@ -1,0 +1,2 @@
+# Optional dependency for the isolated TEST ONLY pixel agent; preserves existing PyBullet.
+opencv-python-headless==4.11.0.86

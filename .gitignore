@@ -1,0 +1,12 @@
+# Exclude local credentials, installed dependencies, caches, and generated logs.
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+logs/*
+!logs/README.md
+.env.*
+!.env.example
+*.zip
+submission/

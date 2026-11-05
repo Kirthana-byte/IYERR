@@ -1,0 +1,10 @@
+# Direct dependencies for the full simulator, Claude agent and automated tests.
+# Tested with Python 3.11; the API key is optional for dummy mode and tests.
+Flask==3.1.2
+Pillow==11.3.0
+pytest==8.4.2
+pybullet==3.2.7
+numpy==2.2.6
+anthropic==0.125.0
+python-dotenv==1.2.1
+requests==2.32.5
