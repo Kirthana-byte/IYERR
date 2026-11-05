@@ -1,4 +1,4 @@
-# Membrane Robot Hackathon: Phase 1 Fetch Robot
+# Membrane Robot Hackathon
 
 Team: IYER 
 
