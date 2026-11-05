@@ -1,37 +1,98 @@
-# Membrane Robot Hackathon: problem statement (summary)
+IYER
 
-Condensed from the supplied "Membrane Robot Hackathon: Problem Statement" (2 Nov 2026). The organizers' original is authoritative.
+Project Overview
 
-## Goal
-Type a command; the robot completes a Fetch without human help. Claude finds the object from the robot camera, the robot drives to it, picks it up, carries it to the drop zone and releases it.
+IYER is a vision-based autonomous robot fetching system designed to explore intelligent robotic interaction with a simulated environment. The project combines physics-based simulation, camera-based visual feedback, and AI-assisted decision-making to enable a robot to identify objects, navigate its surroundings, pick up target objects, and deliver them to a designated location.
 
-## Phases and scoring
-| Component | Weight | Measured by |
-|---|---|---|
-| Phase 1: Fetch works | 40% | Live demo on two judge commands, pass/fail plus directness |
-| Phase 1: Image-driven agent | 25% | Judges read tool-call and image logs |
-| Phase 2: User verdict | 20% | Crowd pulses on three submitted clips |
-| Stretch goal | 15% | Any one listed stretch goal shown working |
+Developed using Python, the system uses PyBullet to simulate the robot and its environment. Camera input provides visual information about the surroundings, which is used for environmental understanding and decision-making. Claude API integration enables AI-based visual reasoning to help determine appropriate robot actions.
 
-Tie-breaker: Phase 1 demo score. Any object-data leakage scores 0 on both Phase 1 components.
+The robot operates through a feedback-driven workflow. It observes the environment, processes visual information, determines the next action, and executes the corresponding movement. The system includes movement, turning, object pickup, and object-drop operations. A state-machine-based control mechanism helps coordinate the different stages of task execution.
 
-## Phase 1 requirements
-- Three processes: game engine (scene, physics, camera, `localhost:8080`), Python agent (tool-use loop, logs), Claude API.
-- One flat room with four walls, 4-6 coloured primitive shapes (at least two share a colour, at least two share a shape), one marked drop zone, one wheeled robot with a forward camera.
-- One plain-language command per run, possibly with reasoning ("Bring the round red thing", "Bring the tallest object").
-- States: Idle, Locate, Go to object, Pick up, Carry, Drop, Done, Blocked. Blocked on collision or no movement for 2 seconds; back off, turn, retry; fail after 3 retries.
-- Outcomes: pass, fail_wrong_object, fail_not_reached, fail_collision.
-- Endpoints: `/state`, `/look`, `/depth` (optional), `/move`, `/turn`, `/pickup`, `/drop`.
-- Camera 640x480, 90 degree HFOV, 0.5 m high, tilted 10 degrees down. Move 1 m/s, turn 90 deg/s, pickup reach 0.5 m and +/-30 degrees.
-- Object data stops at the engine boundary. Never send names, IDs, colours, shapes, positions, distances to objects, counts, masks or drop-zone coordinates to Claude.
-- One Claude call per step, one `/look` after each move or turn, only the latest image. Log every step as JSONL with PNG frames. Soft target 25 steps, hard stop 60.
-- Completion check: pass at least 3 different commands with logs showing Claude found each object from `/look` images, no keyboard or mouse input, live demo to a mentor.
+Flask is used for the application interface, while logging mechanisms record execution details in JSONL format and capture PNG frames for debugging and analysis. The project also incorporates collision recovery logic to improve the robot's ability to handle navigation difficulties.
 
-## Phase 2
-POV clip of each of the three hidden commands: MP4, 720p or higher, 10-20 seconds, command overlay for the first 2 seconds, no team names, logos or code on screen. Upload by hour 20 or Phase 2 scores 0. Crowds answer whether the correct object reached the zone and what went wrong.
+Automated testing is performed using pytest to evaluate individual system components and functionalities. The project is currently an evolving prototype, with ongoing work focused on improving object pickup reliability, navigation efficiency, visual reasoning, and complete autonomous task execution.
 
-## Stretch goals (any one)
-Use pulse results to change behaviour with before/after clips; add furniture or walls blocking the straight path; Claude plans the full path with move and turn only (no `go_to`); multi-view reasoning ("the cube farthest from the green square").
+The long-term vision of IYER is to develop an intelligent robotic system capable of observing, understanding, and interacting with its environment with minimal human intervention.
 
-## Submission
-Public repository with engine and agent code, tool-call log for each hidden-command run, one paragraph on how Claude finds the object from the image, and a booked live demo slot.
+## Objectives
+
+- To develop a simulated autonomous robot capable of navigating an environment and performing object-fetching tasks.
+- To integrate camera-based visual feedback and AI-assisted reasoning for environment understanding and decision-making.
+- To implement reliable robot movement, object pickup, delivery, and recovery mechanisms.
+
+## Technologies Used
+
+- Python 3.11
+- PyBullet – Physics-based robot simulation
+- Flask – Application/backend interface
+- Claude API – AI-based visual reasoning
+- pytest – Automated testing
+- JSONL – Execution logging
+- PNG – Visual frame capture
+
+## Project Structure
+
+- **src/** – Contains the main application and robot control logic.
+- **tests/** – Contains automated test cases using pytest.
+- **assets/** – Stores project-related visual assets and resources.
+- **logs/** – Stores execution logs and debugging information.
+- **frames/** – Contains captured PNG frames from the simulation.
+- **README.md** – Provides project documentation and instructions.
+- **requirements.txt** – Lists the Python dependencies required to run the project.
+
+*Note: Folder names should be adjusted to match the actual repository structure.*
+
+## Installation and Execution
+
+1. Clone the repository:
+
+   ```bash
+   git clone <repository-url>
+   ```
+
+2. Navigate to the project directory:
+
+   ```bash
+   cd IYER
+   ```
+
+3. Create a virtual environment:
+
+   ```bash
+   python -m venv venv
+   ```
+
+4. Activate the virtual environment:
+
+   **Windows:**
+   ```bash
+   venv\Scripts\activate
+   ```
+
+   **Linux/macOS:**
+   ```bash
+   source venv/bin/activate
+   ```
+
+5. Install the required dependencies:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+6. Configure the required API credentials as environment variables before running the application.
+
+7. Execute the project's main entry-point script:
+
+   ```bash
+   python <main-file>.py
+   ```
+
+   *Replace `<main-file>.py` with the actual entry-point filename.*
+
+## Contributors
+
+- Mrinal.M
+- Samruddh.B.Patil
+- Kirthana.JL
+- Abhitha.Rohith
