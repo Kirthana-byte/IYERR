@@ -1,6 +1,6 @@
 IYER
 
-** Project statement
+Project statement
 
 IYER is a vision-based autonomous robot fetching system designed to explore intelligent robotic interaction with a simulated environment. The project combines physics-based simulation, camera-based visual feedback, and AI-assisted decision-making to enable a robot to identify objects, navigate its surroundings, pick up target objects, and deliver them to a designated location.
 
