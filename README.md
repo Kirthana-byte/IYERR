@@ -1,5 +1,5 @@
 <!-- Explains how to install, verify, run and honestly present the complete Phase 1 project. -->
-# Membrane Robot — Phase 1
+# Membrane Robot 
 
 **Existing installation? Read BATCHES.md first. Preserve your accelerated .venv.**
 
