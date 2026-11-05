@@ -1,0 +1,459 @@
+--- a/engine/pybullet_robot.py
++++ b/engine/pybullet_robot.py
+@@ -18,7 +18,7 @@
+ class PyBulletRobot(Robot):
+     DT = 1/240
+ 
+-    def __init__(self, gui=False, command='', seed=0, realtime=True, report=None):
++    def __init__(self, gui=False, command='', seed=0, realtime=True, report=None, record_pov=False):
+         self.client = p.connect(p.GUI if gui else p.DIRECT)
+         self.renderer = p.ER_BULLET_HARDWARE_OPENGL if gui else p.ER_TINY_RENDERER
+         p.setRealTimeSimulation(0, physicsClientId=self.client)
+@@ -28,6 +28,8 @@
+         self.x = self.y = self.heading = 0.0
+         self.held = None
+         self.machine = StateMachine(self._transition)
++        from .recorder import POVRecorder
++        self.recorder=POVRecorder(Path(report).parent/'pov') if record_pov and report else None
+         self._pending_collision=None
+         self._incident=0
+         self.sim_time = 0.0
+@@ -179,6 +181,11 @@
+ 
+     def _transition(self,before,after,retries):
+         self._event('state',from_state=before,to_state=after,retries=retries)
++        if self.recorder:
++            if before=='Idle':self.recorder.start(self.sim_time,self._frame)
++            if after=='Done':
++                self._render()
++                self.recorder.stop(self.sim_time,self._frame)
+ 
+     def _contact(self,direction=-1):
+         before=self.machine.name
+@@ -337,6 +344,7 @@
+         data=p.getCameraImage(640,480,view,projection,renderer=self.renderer,
+             flags=p.ER_NO_SEGMENTATION_MASK,physicsClientId=self.client)
+         self._frame=Image.fromarray(np.ascontiguousarray(np.asarray(data[2],dtype=np.uint8).reshape(480,640,4)[:,:,:3]))
++        if self.recorder:self.recorder.capture(self._frame,self.sim_time)
+         self._last_render_tick=self._ticks
+         self.camera_frames+=1
+         self.camera_render_seconds+=time.perf_counter()-start
+--- /dev/null
++++ b/engine/recorder.py
+@@ -0,0 +1,40 @@
++# Saves raw onboard-camera frames on the simulation clock, never spectator views.
++# These private recording files are not sent to the agent or to Claude.
++import json
++from pathlib import Path
++
++
++class POVRecorder:
++    def __init__(self,folder):
++        self.folder=Path(folder)
++        self.active=False
++        self.start_time=None
++        self.last_time=None
++        self.count=0
++
++    def start(self,sim_time,image):
++        if self.start_time is not None:return
++        self.folder.mkdir(parents=True,exist_ok=True)
++        self.active=True;self.start_time=sim_time
++        self._manifest(None,False)
++        self.capture(image,sim_time)
++
++    def capture(self,image,sim_time):
++        if not self.active or image is None:return
++        if self.last_time is not None and sim_time<=self.last_time+1e-9:return
++        name=f'step_{self.count:06d}.png'
++        image.save(self.folder/name,format='PNG',compress_level=1)
++        with (self.folder/'frames.jsonl').open('a',encoding='utf-8') as out:
++            out.write(json.dumps({'index':self.count,'sim_seconds':sim_time,'frame_path':name})+'\n')
++        self.count+=1;self.last_time=sim_time
++
++    def stop(self,sim_time,image):
++        if not self.active:return
++        self.capture(image,sim_time)
++        self.active=False
++        self._manifest(sim_time,True)
++
++    def _manifest(self,end,complete):
++        (self.folder/'recording.json').write_text(json.dumps({'start_sim_seconds':self.start_time,
++            'end_sim_seconds':end,'complete':complete,'frames':self.count,
++            'source':'onboard_camera','width':640,'height':480}),encoding='utf-8')
+--- a/engine/server.py
++++ b/engine/server.py
+@@ -97,6 +97,7 @@
+     parser.add_argument('--command', default='')
+     parser.add_argument('--seed', type=int, default=0)
+     parser.add_argument('--report')
++    parser.add_argument('--record-pov',action='store_true')
+     parser.add_argument('--stop-file')
+     parser.add_argument('--port', type=int, default=8080)
+     args = parser.parse_args()
+@@ -105,7 +106,7 @@
+     else:
+         from .pybullet_robot import PyBulletRobot
+         robot = PyBulletRobot(gui=args.gui, command=args.command, seed=args.seed,
+-                             realtime=not args.fast, report=args.report)
++                             realtime=not args.fast, report=args.report, record_pov=args.record_pov)
+     # Single owner thread keeps all Bullet calls, GUI and HTTP mutations serialized.
+     server = make_server('127.0.0.1', args.port, create_app(robot))
+     server.timeout = .02
+--- /dev/null
++++ b/export_clip.py
+@@ -0,0 +1,137 @@
++# Exports simulation-time POV frames to H.264, with only the command for 2 seconds.
++# Retiming is explicit: --retime 12 changes playback speed, never the action evidence.
++import argparse
++import bisect
++import hashlib
++import io
++import json
++import math
++import shutil
++import subprocess
++import tempfile
++import textwrap
++from pathlib import Path
++from PIL import Image,ImageDraw,ImageFont
++import numpy as np
++
++
++def probe(path):
++    if not shutil.which('ffprobe'):raise RuntimeError('Install FFmpeg (ffmpeg and ffprobe on PATH)')
++    result=subprocess.run(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(path)],
++                          capture_output=True,text=True,timeout=30,check=True)
++    return json.loads(result.stdout)
++
++
++def video_rules(path,overlay_ok):
++    info=probe(path);video=next((s for s in info['streams'] if s['codec_type']=='video'),{})
++    duration=float(info['format'].get('duration',0))
++    return {'duration':10<=duration<=20.0001,
++            'resolution':video.get('width',0)>=1280 and video.get('height',0)>=720,
++            'codec':video.get('codec_name')=='h264',
++            'audio':not any(s['codec_type']=='audio' for s in info['streams']),
++            'overlay':bool(overlay_ok)},duration
++
++
++def font(size):
++    for name in ('C:/Windows/Fonts/segoeui.ttf','/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'):
++        if Path(name).exists():return ImageFont.truetype(name,size)
++    return ImageFont.load_default(size=size)
++
++
++def make_frame(source,command,overlay):
++    # Preserve the 4:3 camera geometry inside a 16:9 canvas; never stretch perception.
++    with Image.open(source) as image:
++        if image.size!=(640,480):raise ValueError('Recording contains a non-640x480 frame')
++        image=image.convert('RGB').resize((960,720),Image.Resampling.LANCZOS)
++    canvas=Image.new('RGB',(1280,720),'black');canvas.paste(image,(160,0))
++    if overlay:
++        draw=ImageDraw.Draw(canvas)
++        lines=textwrap.wrap(command,width=72,replace_whitespace=False) or ['']
++        size=min(30,max(14,170//len(lines)))
++        face=font(size);line_height=size+8;bottom=16+len(lines)*line_height
++        draw.rectangle((0,0,1279,bottom),fill='black')
++        for i,line in enumerate(lines):draw.text((24,8+i*line_height),line,font=face,fill='white')
++    return canvas
++
++
++def decoded_frame(path,seconds):
++    result=subprocess.run(['ffmpeg','-v','error','-ss',str(seconds),'-i',str(path),
++        '-frames:v','1','-f','image2pipe','-vcodec','png','-threads','1','-'],capture_output=True,timeout=30,check=True)
++    return Image.open(io.BytesIO(result.stdout)).convert('RGB')
++
++
++def export(folder,retime=None):
++    folder=Path(folder).resolve();source=folder/'pov'
++    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
++        raise RuntimeError('Install FFmpeg and add ffmpeg/ffprobe to PATH; saved raw frames remain available')
++    manifest=json.loads((source/'recording.json').read_text())
++    if not manifest['complete']:raise ValueError('Recording did not reach Done; refusing a partial clip')
++    frames=[json.loads(line) for line in (source/'frames.jsonl').read_text().splitlines()]
++    if not frames:raise ValueError('No POV frames')
++    for row in frames:
++        path=(source/row['frame_path']).resolve()
++        if not path.is_relative_to(source) or not path.is_file():raise ValueError('Unsafe or missing POV frame')
++    start=manifest['start_sim_seconds'];natural=manifest['end_sim_seconds']-start
++    if natural<=0:raise ValueError('No positive simulation duration to record')
++    if retime is not None and (not math.isfinite(retime) or not 10<=retime<=20):
++        raise ValueError('--retime must be between 10 and 20 seconds')
++    duration=retime if retime is not None else natural
++    if duration>600:raise ValueError('Recording too long; explicitly choose --retime 10..20')
++    summary=json.loads((folder/'summary.json').read_text())
++    command=summary['command']
++    if not isinstance(command,str) or not command.strip() or len(command)>500:
++        raise ValueError('Command must contain 1..500 characters for the readable overlay')
++    count=max(1,math.ceil(duration*30-1e-7));times=[r['sim_seconds'] for r in frames]
++    def source_at(t):
++        index=max(0,bisect.bisect_right(times,start+min(t/duration,1)*natural)-1)
++        return source/frames[index]['frame_path']
++    output=folder/'clip.mp4';temporary=folder/'clip_pending.mp4'
++    with tempfile.TemporaryFile() as errors:
++        process=subprocess.Popen(['ffmpeg','-y','-v','error','-f','rawvideo','-pix_fmt','rgb24',
++            '-s','1280x720','-r','30','-i','pipe:0','-an','-c:v','libx264','-threads','2',
++            '-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-movflags','+faststart',str(temporary)],
++            stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=errors)
++        try:
++            for i in range(count):
++                process.stdin.write(make_frame(source_at(i/30),command,i<60).tobytes())
++            process.stdin.close()
++            if process.wait(timeout=90)!=0:raise RuntimeError('FFmpeg H.264 encoder failed')
++        except BaseException:
++            process.kill();process.wait();temporary.unlink(missing_ok=True);raise
++    temporary.replace(output)
++    # Compare decoded video pixels with the commanded overlay, not a metadata promise.
++    samples=[t for t in (0,1,59/30,61/30) if t<count/30]
++    overlay_ok=len(samples)==4
++    differences=[]
++    for t in samples:
++        actual=np.asarray(decoded_frame(output,t),dtype=np.int16)
++        clean=np.asarray(make_frame(source_at(t),command,False),dtype=np.int16)
++        marked=np.asarray(make_frame(source_at(t),command,True),dtype=np.int16)
++        mask=np.max(np.abs(marked-clean),axis=2)>30
++        expected=marked if t<2 else clean
++        error=float(np.abs(actual-expected)[mask].mean()) if mask.sum()>100 else 999.0
++        differences.append(error);overlay_ok &= error<12
++    rules,actual_duration=video_rules(output,overlay_ok)
++    report={'rules':rules,'duration_seconds':actual_duration,'natural_seconds':natural,
++            'retimed':retime is not None,'playback_speed':natural/duration,
++            'overlay_pixel_errors':differences,'sha256':hashlib.sha256(output.read_bytes()).hexdigest(),
++            'mode':summary.get('mode','dummy' if summary.get('dummy') else 'claude'),
++            'live_claude':'UNVERIFIED'}
++    (folder/'clip_check.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
++    for name,ok in rules.items():print(f"{'PASS' if ok else 'FAIL'} clip_{name}")
++    print(f'Clip duration: {actual_duration:.3f}s; recorded simulation: {natural:.3f}s')
++    if not rules['duration']:
++        print(f'Optional retiming: python export_clip.py "{folder}" --retime 12')
++    print('Branding/content: raw onboard frames only; manual review of the scene and command remains required.')
++    return report
++
++
++def main():
++    parser=argparse.ArgumentParser();parser.add_argument('folder');parser.add_argument('--retime',type=float)
++    args=parser.parse_args()
++    try:return int(not all(export(args.folder,args.retime)['rules'].values()))
++    except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
++        print(f'FAIL clip_export: {exc}');return 1
++
++
++if __name__=='__main__':raise SystemExit(main())
+--- /dev/null
++++ b/package_run.py
+@@ -0,0 +1,104 @@
++# Copies one finished run into the submission layout without inventing missing evidence.
++# Dummy/pixel runs are labelled test-only. Invalid clips must be explicitly retimed first.
++import argparse
++import hashlib
++import json
++import shutil
++from pathlib import Path
++from agent.leak_check import without_images
++from export_clip import video_rules
++
++SETTINGS='''# Membrane robot submission
++
++Camera: JPEG 640x480, 90-degree horizontal FOV, front mount 0.5 m high,
++10 degrees down. Depth: single camera-centre ray, max 10 m, scalar or null.
++Motion: 1 m/s, 90 degrees/s. Pickup: centre distance <=0.5 m, bearing +/-30 degrees.
++Collision: stop and request 0.1 m backoff; actual backoff can be obstructed and is logged.
++Physics advances only during move/turn. Rear snap attachment keeps the front camera clear.
++Recorded camera frames are scaled with preserved aspect ratio into 1280x720 H.264,
++no audio. The typed command is the only added text, during the first 2 seconds.
++Explicit retiming, if used, is disclosed in clip_check_runN.json.
++
++From the source project in Windows PowerShell:
++
++```powershell
++& $robotPython -m pytest -q
++& $robotPython run_command.py "YOUR COMMAND" --gui
++& $robotPython check_logs.py "logs\\RUN_FOLDER"
++& $robotPython export_clip.py "logs\\RUN_FOLDER" --retime 12
++& $robotPython package_run.py "logs\\RUN_FOLDER" 1
++```
++
++Omit --retime when natural duration is already 10-20 s. Claude requires a local
++.env with ANTHROPIC_API_KEY. Never include that file in the submission.
++--dummy is scripted plumbing; --pixel is TEST ONLY. Neither proves Claude autonomy.
++Full API request traces replace binary images with placeholders; exact original
++requests remain in local logs. engine_events files provide the complete state and
++recovery trace without changing the required action-log schema.
++Live Claude fetching/recognition: UNVERIFIED until independently reviewed.
++'''
++
++
++def package(folder,number,destination='submission'):
++    folder=Path(folder).resolve();destination=Path(destination).resolve()
++    if not 1<=number<=999:raise ValueError('Run number must be 1..999')
++    summary=json.loads((folder/'summary.json').read_text())
++    if summary.get('evaluation',{}).get('state')!='Done':raise ValueError('Only finished runs can be packaged')
++    clip=folder/'clip.mp4';report=json.loads((folder/'clip_check.json').read_text())
++    if hashlib.sha256(clip.read_bytes()).hexdigest()!=report['sha256']:
++        raise ValueError('Clip changed after validation; export/check it again')
++    rules,_=video_rules(clip,report['rules'].get('overlay',False))
++    if not all(rules.values()):raise ValueError('Clip failed checks; optionally run export_clip.py RUN --retime 12 first')
++    paths={
++        'actions':destination/'logs'/f'command_{number}.jsonl',
++        'events':destination/'logs'/f'engine_events_run{number}.jsonl',
++        'sensors':destination/'logs'/f'sensor_calls_run{number}.jsonl',
++        'trace':destination/'prompts'/f'full_trace_run{number}.json',
++        'clip':destination/'clips'/f'command_{number}.mp4',
++        'check':destination/'clips'/f'clip_check_run{number}.json',
++        'summary':destination/'logs'/f'summary_run{number}.json'}
++    if any(p.exists() for p in paths.values()):raise ValueError('Run number already packaged; use a new number/destination')
++    requests=[]
++    if (folder/'requests.jsonl').exists():
++        requests=[json.loads(line) for line in (folder/'requests.jsonl').read_text().splitlines()]
++    steps=[json.loads(line) for line in (folder/'steps.jsonl').read_text().splitlines()]
++    if not steps:raise ValueError('Missing action evidence')
++    if not requests and summary.get('mode')!='pixel':raise ValueError('Missing Claude/dummy request trace')
++    copies={}
++    for step in steps:
++        if step['frame_path']:
++            src=(folder/step['frame_path']).resolve()
++            if not src.is_relative_to(folder) or not src.is_file():raise ValueError('Unsafe or missing frame path')
++            if src not in copies:copies[src]=f'run{number}_step{len(copies):02d}.png'
++            step['frame_path']='frames/'+copies[src]
++    for p in paths.values():p.parent.mkdir(parents=True,exist_ok=True)
++    (destination/'logs'/'frames').mkdir(exist_ok=True)
++    for src,name in copies.items():shutil.copy2(src,destination/'logs'/'frames'/name)
++    paths['actions'].write_text(''.join(json.dumps(s)+'\n' for s in steps),encoding='utf-8')
++    for key,name in [('events','engine_events.jsonl'),('sensors','sensor_calls.jsonl'),('summary','summary.json')]:
++        shutil.copy2(folder/name,paths[key])
++    paths['trace'].write_text(json.dumps(without_images(requests),indent=2),encoding='utf-8')
++    prompt='\n'.join(b['text'] for b in requests[0]['payload']['system']) if requests else 'No Claude requests: TEST ONLY pixel mode.\n'
++    # Keep per-run prompts too, since model policy may change between submissions.
++    (destination/'prompts'/f'system_prompt_run{number}.txt').write_text(prompt,encoding='utf-8')
++    main_prompt=destination/'prompts'/'system_prompt.txt'
++    if not main_prompt.exists():main_prompt.write_text(prompt,encoding='utf-8')
++    shutil.copy2(clip,paths['clip']);shutil.copy2(folder/'clip_check.json',paths['check'])
++    (destination/'README.md').write_text(SETTINGS,encoding='utf-8')
++    stretch=destination/'stretch_goal';stretch.mkdir(exist_ok=True)
++    from stretch_report import generate
++    generate(folder,stretch/f'run{number}.md')
++    reports=sorted(stretch.glob('run*.md'))
++    (stretch/'report.md').write_text('# Path-planning evidence\n\n'+ '\n\n'.join(p.read_text() for p in reports),encoding='utf-8')
++    print(f'PASS packaged {destination}; mode={summary.get("mode","dummy" if summary.get("dummy") else "claude")}; live Claude UNVERIFIED')
++    return destination
++
++
++def main():
++    parser=argparse.ArgumentParser();parser.add_argument('folder');parser.add_argument('number',type=int)
++    parser.add_argument('--out',default='submission');args=parser.parse_args()
++    try:package(args.folder,args.number,args.out);return 0
++    except (OSError,ValueError,KeyError) as exc:print(f'FAIL package: {exc}');return 1
++
++
++if __name__=='__main__':raise SystemExit(main())
+--- a/run_command.py
++++ b/run_command.py
+@@ -25,6 +25,7 @@
+     parser.add_argument('--fast',action='store_true',help='Disable real-time pacing for tests')
+     parser.add_argument('--seed',type=int,default=0)
+     parser.add_argument('--port',type=int,default=8080)
++    parser.add_argument('--no-record-pov',action='store_true',help='Skip recording for quick plumbing tests')
+     args=parser.parse_args()
+     load_dotenv(ROOT/'.env')
+     if not args.dummy and not os.environ.get('ANTHROPIC_API_KEY','').strip():
+@@ -42,6 +43,7 @@
+     command=[sys.executable,'-m','engine.server','--command',args.command,
+              '--seed',str(args.seed),'--report',str(report),'--stop-file',str(stop),
+              '--port',str(args.port)]
++    if not args.no_record_pov: command.append('--record-pov')
+     if args.gui: command.append('--gui')
+     if args.fast: command.append('--fast')
+     env=os.environ.copy()
+@@ -81,6 +83,12 @@
+     (folder/'summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+     print(json.dumps(summary,indent=2))
+     print(f'Logs: {folder}')
++    if not args.no_record_pov:
++        try:
++            from export_clip import export
++            export(folder)
++        except (ValueError,OSError,RuntimeError,subprocess.SubprocessError) as exc:
++            print(f'FAIL clip export: {exc}')
+     return 0 if verdict=='PASS' else 1
+ 
+ 
+--- /dev/null
++++ b/stretch_report.py
+@@ -0,0 +1,27 @@
++# Builds an evidence-based report; API attempts and dummy success never prove autonomy.
++import json
++from pathlib import Path
++
++
++def generate(folder,output):
++    folder=Path(folder);summary=json.loads((folder/'summary.json').read_text())
++    steps=[json.loads(x) for x in (folder/'steps.jsonl').read_text().splitlines()]
++    requests=[json.loads(x) for x in (folder/'requests.jsonl').read_text().splitlines()] if (folder/'requests.jsonl').exists() else []
++    tool_names=sorted({t['name'] for r in requests for t in r['payload'].get('tools',[])})
++    actions=[s['tool'] for s in steps];motion=[x for x in actions if x in ('move','turn','go_to')]
++    mode=summary.get('mode','dummy' if summary.get('dummy') else 'claude')
++    text=f'''## Run mode: {mode}
++
++Implemented: Claude chooses movement through move and turn; no go_to tool is defined.
++Recorded tool names: {', '.join(tool_names) or 'No Claude tool requests recorded'}.
++Recorded motion actions: {', '.join(motion) or 'None'}.
++go_to absent from recorded tools/actions: {'YES' if 'go_to' not in tool_names+actions else 'NO'}.
++Recorded run result: {summary.get('verdict','UNVERIFIED')}.
++
++Live Claude path planning: UNVERIFIED. A live_attempt row proves an attempted
++request, not successful vision reasoning. Dummy/pixel results are TEST ONLY.
++Mentor review of actual live requests, visual notes, images and successful delivery
++is required before awarding this stretch goal. No obstacle scene is claimed.
++'''
++    output=Path(output);output.parent.mkdir(parents=True,exist_ok=True);output.write_text(text,encoding='utf-8')
++    return text
+--- /dev/null
++++ b/tests/test_recording.py
+@@ -0,0 +1,46 @@
++# Verifies simulation-clock capture and actual FFmpeg output, including decoded overlay.
++import json
++import shutil
++import pytest
++from PIL import Image
++from engine.recorder import POVRecorder
++from export_clip import export,video_rules
++
++
++def test_recorder_skips_thinking_time_and_stops_at_done(tmp_path):
++    r=POVRecorder(tmp_path/'pov');frame=Image.new('RGB',(640,480),(70,80,90))
++    r.capture(frame,0);assert not r.folder.exists()
++    r.start(0,frame);r.capture(frame,0);r.capture(frame,.1)
++    r.stop(.2,frame);r.capture(frame,1)
++    rows=[json.loads(x) for x in (r.folder/'frames.jsonl').read_text().splitlines()]
++    assert len(rows)==3
++    assert [x['sim_seconds'] for x in rows]==[0,.1,.2]
++    assert json.loads((r.folder/'recording.json').read_text())['complete'] is True
++
++
++@pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'),reason='FFmpeg tools missing')
++def test_real_h264_retime_overlay_and_package(tmp_path):
++    from package_run import package
++    r=POVRecorder(tmp_path/'pov');frame=Image.new('RGB',(640,480),(70,80,90))
++    r.start(0,frame);r.stop(1,frame)
++    (tmp_path/'summary.json').write_text(json.dumps({'command':'Bring the red cube to the green square',
++        'mode':'dummy','dummy':True,'verdict':'PASS','evaluation':{'state':'Done'}}))
++    import io
++    from agent.runner import request_payload
++    raw=io.BytesIO();frame.save(raw,'JPEG');frame.save(tmp_path/'step_000.png')
++    (tmp_path/'steps.jsonl').write_text(json.dumps({'step':1,'timestamp':'2026-11-05T00:00:00Z',
++        'tool':'pickup','args':{},'result':{'success':True},'frame_path':'step_000.png','visual_note':''})+'\n')
++    payload=request_payload('Bring the red cube to the green square',[],None,raw.getvalue(),None,False,1,'test')
++    (tmp_path/'requests.jsonl').write_text(json.dumps({'step':1,'mode':'dummy_not_sent','payload':payload})+'\n')
++    (tmp_path/'engine_events.jsonl').write_text('')
++    (tmp_path/'sensor_calls.jsonl').write_text('')
++    report=export(tmp_path,10)
++    assert all(report['rules'].values())
++    assert report['retimed'] and report['natural_seconds']==1
++    out=package(tmp_path,1,tmp_path/'submission')
++    assert (out/'clips'/'command_1.mp4').is_file()
++    assert (out/'prompts'/'full_trace_run1.json').is_file()
++    with pytest.raises(ValueError,match='already packaged'):package(tmp_path,1,out)
++    # A later file change cannot keep the earlier compliance certificate.
++    with (tmp_path/'clip.mp4').open('ab') as f:f.write(b'changed')
++    with pytest.raises(ValueError,match='changed after'):package(tmp_path,2,out)

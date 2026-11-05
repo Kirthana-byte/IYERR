@@ -1,0 +1,505 @@
+--- a/.gitignore
++++ b/.gitignore
+@@ -6,3 +6,7 @@
+ *.pyc
+ logs/*
+ !logs/README.md
++.env.*
++!.env.example
++*.zip
++submission/
+--- /dev/null
++++ b/BATCHES.md
+@@ -0,0 +1,99 @@
++<!-- Lists the exact verification commands and honest limits for batches 1–3. -->
++# Batches 1–3
++
++Copy the changed source into your existing project, preserving .venv, .env and logs.
++Or extract the full updated archive into a new directory and use the same Python.
++The changes/ folder contains sequential patches with file paths and changed code.
++
++In PowerShell, from the project directory under KIS:
++
++```powershell
++$robotPython = "C:\Users\mrina\OneDrive\Desktop\hackoven\membrane_phase1\.venv\Scripts\python.exe"
++```
++
++## Batch 1
++
++```powershell
++& $robotPython -m pytest tests/test_agent.py tests/test_batch1.py tests/test_leaks.py -q
++& $robotPython run_command.py "Bring the red cube to the green square" --dummy --gui
++$run = (Get-ChildItem .\logs -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'steps.jsonl') } | Sort-Object Name | Select-Object -Last 1).FullName
++& $robotPython check_logs.py $run
++```
++
++Leak errors identify their exact field. User commands and model visual notes are
++allowed; a mandatory boolean in_zone and the robot's own x/y pose are also allowed.
++Banning those would contradict the required interface. Source code/tests can contain
++words used to define a blacklist; the checks examine model-bound data and log keys.
++This is an additional regression guard, not a mathematical proof of zero leakage.
++
++steps.jsonl adds visual_note. engine_events.jsonl provides the whole state trace and
++collision/recovery details; sensor_calls.jsonl proves the actual /look schedule.
++Backoff_requested is 0.1; backoff_actual is the measured displacement, which can be
++shorter if another obstacle prevents retreat. No phantom 0.1 m movement is logged.
++A collision-free run does not verify recovery. Live Claude is UNVERIFIED.
++
++## Batch 2
++
++FFmpeg and ffprobe must be installed and available in PATH. If missing:
++
++```powershell
++winget install --id Gyan.FFmpeg --exact
++```
++
++Package reference: https://github.com/microsoft/winget-pkgs/tree/master/manifests/g/Gyan/FFmpeg
++Close and reopen PowerShell after installation, then set $robotPython again.
++Check in the new terminal:
++
++```powershell
++Get-Command ffmpeg, ffprobe
++& $robotPython -m pytest tests/test_recording.py -q
++& $robotPython export_clip.py $run --retime 12
++& $robotPython package_run.py $run 1
++```
++
++Every supervised run records raw onboard frames from leaving Idle through Done.
++Reads while Claude thinks do not add duplicate simulation-time frames. The default
++export uses the natural simulated duration. If outside 10–20 s, it prints FAIL and
++the explicit --retime command. Retiming changes playback speed and is disclosed.
++`--no-record-pov` is available for quick plumbing tests. Missing FFmpeg does not
++lose the raw frames; export after installing it.
++
++Export: H.264 MP4, 1280x720, aspect ratio preserved with side bars, no audio. The
++command is drawn for exactly 60 frames at 30 fps. Decoded samples at 0, 1, 1.967 and
++2.033 seconds are compared with the expected pixels. No other text is added.
++Manual review is still required for any text/logo already present in the scene or
++in the typed command; format checks cannot certify human visual judging results.
++
++package_run.py rejects unfinished runs, missing evidence, invalid/changed clips and
++an already-used submission number. It preserves original logs and creates:
++
++- logs/command_N.jsonl and logs/frames/runN_stepNN.png
++- logs/engine_events_runN.jsonl and sensor_calls_runN.jsonl
++- prompts/system_prompt.txt, per-run prompts and full_trace_runN.json
++- clips/command_N.mp4 and clip_check_runN.json
++- README.md and stretch_goal/report.md
++
++Trace files retain complete request envelopes/messages with image blocks replaced
++by placeholders. Exact binary-image requests remain in original local logs.
++Phase 2 API upload is not implemented; the organizer's API guide/key is still needed.
++
++## Batch 3
++
++```powershell
++& $robotPython -m pip install -r requirements-pixel.txt
++& $robotPython -m pytest tests/test_pixel_agent.py -q
++& $robotPython run_command.py "Bring the red cube to the green square" --pixel --gui
++& $robotPython check_hygiene.py
++& $robotPython -m pytest -q
++```
++
++Pixel mode is TEST ONLY, independent of the Claude path. It accepts:
++Bring the <red|blue|green|yellow|orange|purple> <cube|sphere|round thing> to the <colour> square.
++It also accepts “round red thing” adjective order. It rejects tallest/relative
++reasoning commands. Masks and geometry estimates use only HTTP camera pixels and
++published camera calibration; no object records, IDs, coordinates or counts are read.
++The small controller is a diagnostic baseline, not a replacement for Claude.
++Default mode still requires Claude; no automatic silent fallback to a test agent.
++
++The key scan reports file and line, never key values. A local .env is ignored, but
++tracked credentials fail. Public repository visibility remains UNVERIFIED.
+--- /dev/null
++++ b/BATCH_VALIDATION.md
+@@ -0,0 +1,15 @@
++<!-- Records checks actually executed; no live Claude claims. -->
++# Batch validation — 5 November 2026
++
++- Full suite: 84 passed in 86.54 seconds, Python 3.11, Linux CPU rendering.
++- Dummy fetch: PASS, 3 steps. Scripted plumbing only.
++- Pixel cube: PASS, 22 steps. Pixel sphere: PASS, 33 steps (over 25-step soft target).
++- Earlier pixel sphere attempt failed at 60 steps; damped image-bearing turns fixed the observed oscillation.
++- Sphere log audit: PASS, zero consecutive looks, complete state trace, no collisions in that run.
++- Collision/backoff/recovery and retry exhaustion: covered by automated tests; live Claude recovery UNVERIFIED.
++- Actual clip: 12.000 seconds after explicit retiming from 4.304 simulated seconds. Duration, resolution, H.264, no audio and sampled overlay checks PASS.
++- Actual dummy submission packaging: PASS. Dummy evidence is not a live submission demonstration.
++- Source credential scan: PASS. Public repository visibility UNVERIFIED.
++- No new Windows GPU FPS benchmark performed. No 30 FPS claim for this environment.
++- Live Claude recognition, fetch performance and mentor readiness: UNVERIFIED. ANTHROPIC_API_KEY must be set locally; never upload it.
++- Literal keyword scanning exempts typed commands, model visual notes, mandatory in_zone boolean and robot pose. It does not prove absence of all covert leakage.
+--- a/INTERFACE.md
++++ b/INTERFACE.md
+@@ -59,3 +59,17 @@
+ required string contains Claude's own pixel-derived notes; it is stripped before
+ HTTP dispatch. Endpoint bodies remain exactly the table above. The latest twelve
+ action lines carry these notes; each new note should retain useful earlier observations.
++
++## Local evidence (not additional robot endpoints)
++
++steps.jsonl includes visual_note, copied from Claude's visual_memory field and never
++sent to the engine. sensor_calls.jsonl records every actual successful HTTP sensor/action
++call. engine_events.jsonl records state transitions, collisions, requested/actual backoff,
++recovery angle, retries and post-recovery state. An obstructed backoff is honestly
++recorded as shorter than 0.1 m. Raw POV recording uses the simulation clock; it never
++adds /look requests to Claude's decision schedule.
++
++The text leak scanner exempts only the typed command and known model-note fields.
++The mandatory boolean in_zone and permitted robot pose fields remain legal. A blanket
++ban of those contract fields would reject valid responses; arbitrary scene fields
++are still rejected by endpoint allowlists.
+--- a/README.md
++++ b/README.md
+@@ -1,7 +1,7 @@
+ <!-- Explains how to install, verify, run and honestly present the complete Phase 1 project. -->
+ # Membrane Robot — Phase 1
+ 
+-**Existing installation? Read REPAIR_GUIDE.md first. Preserve your accelerated .venv.**
++**Existing installation? Read BATCHES.md first. Preserve your accelerated .venv.**
+ 
+ Windows, Python 3.11, PyBullet. All seven requested build stages are included.
+ No key is needed for tests or dummy mode. Live Claude operation requires your own
+@@ -119,8 +119,8 @@
+ - Strict endpoint allowlists and tests against injected metadata.
+ - Automated checks and Windows instructions. Windows GUI and live API operation
+   must still be checked on your laptop; validation here uses Linux Python 3.11.
+-- Phase 2 video capture/upload is not part of this deliverable. Images logged for
+-  reasoning are 640x480, not a compliant 720p Phase 2 video.
++- POV capture and H.264 export are now included; see BATCHES.md. Membrane API
++  upload remains unimplemented because no API guide/key was provided.
+ 
+ ## Private evaluation and specification decisions
+ 
+@@ -164,7 +164,7 @@
+ - logs/<timestamp>/: step_NNN.png, steps.jsonl, evaluation.json, summary.json,
+   engine.log, requests.jsonl, optional usage.jsonl
+ 
+-Every steps.jsonl record has step, timestamp, tool, args, result, frame_path. The
++Every steps.jsonl record has step, timestamp, tool, args, result, frame_path, visual_note. The
+ frame path identifies the image supplied for that decision; it is null when no
+ image was sent. A fresh frame after the final motion can exist without a following
+ decision. Final scores, private reports and engine logs are never sent to Claude.
+@@ -193,3 +193,10 @@
+ depth, collision flag and history. It contains only robot pose/status, not object data.
+ Camera settings and requirements.txt are unchanged. The benchmark now supports
+ --frames and --profile; HTTP timing has a separate diagnostics.py command.
++
++## Batches 1–3
++
++See BATCHES.md for leak checks, explicit recovery/state logs, POV export, submission
++packaging and optional TEST ONLY pixel mode. Private evaluation now names its boolean
++`verified` rather than `target_verified` so log keys remain neutral. This boolean is
++still evaluator bookkeeping, not proof of visual recognition.
+--- /dev/null
++++ b/agent/pixel_agent.py
+@@ -0,0 +1,136 @@
++# TEST ONLY: HTTP-only colour/shape controller, independent of the Claude agent.
++# Supported: "Bring the <colour> cube/sphere/round thing to the <colour> square".
++# Colours: red, blue, green, yellow, orange, purple. No tallest/relative reasoning.
++# Geometry estimates come from camera pixels and the published camera calibration.
++import io
++import json
++import math
++import re
++from datetime import datetime,timezone
++from pathlib import Path
++import cv2
++import numpy as np
++from PIL import Image
++from .client import RobotClient
++
++COLOURS={
++    'red':[(0,10),(170,179)],'orange':[(11,24)],'yellow':[(25,35)],
++    'green':[(36,85)],'blue':[(90,135)],'purple':[(136,169)]}
++SUPPORTED='Bring the <red|blue|green|yellow|orange|purple> <cube|sphere|round thing> to the <colour> square'
++
++
++def parse(command):
++    match=re.fullmatch(r"\s*(?:bring|fetch)\s+(?:the\s+)?(red|blue|green|yellow|orange|purple)\s+(cube|sphere|round thing)\s+to\s+(?:the\s+)?(red|blue|green|yellow|orange|purple)\s+square[.!]?\s*",command.lower())
++    # Also accept the ordinary adjective order "round red thing".
++    if not match:
++        command=re.sub(r'round (red|blue|green|yellow|orange|purple) thing',r'\1 round thing',command.lower())
++        match=re.fullmatch(r"\s*(?:bring|fetch)\s+(?:the\s+)?(red|blue|green|yellow|orange|purple)\s+(cube|sphere|round thing)\s+to\s+(?:the\s+)?(red|blue|green|yellow|orange|purple)\s+square[.!]?\s*",command)
++    if not match:raise ValueError('TEST ONLY supported command: '+SUPPORTED)
++    colour,shape,destination=match.groups()
++    return colour,('sphere' if shape=='round thing' else shape),destination
++
++
++def detect(jpeg,colour,shape=None,allow_clipped=False):
++    image=cv2.imdecode(np.frombuffer(jpeg,dtype=np.uint8),cv2.IMREAD_COLOR)
++    if image is None or image.shape[:2]!=(480,640):raise ValueError('Invalid camera pixels')
++    hsv=cv2.cvtColor(image,cv2.COLOR_BGR2HSV);mask=np.zeros(hsv.shape[:2],dtype=np.uint8)
++    for low,high in COLOURS[colour]:
++        mask |= cv2.inRange(hsv,np.array([low,80,45]),np.array([high,255,255]))
++    contours,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
++    found=[]
++    for contour in contours:
++        area=cv2.contourArea(contour)
++        if area<60:continue
++        length=cv2.arcLength(contour,True)
++        polygon=cv2.approxPolyDP(contour,.025*length,True)
++        circularity=4*math.pi*area/max(length*length,1)
++        x,y,w,h=cv2.boundingRect(contour)
++        clipped=x<=1 or y<=1 or x+w>=639 or y+h>=479
++        if shape and clipped and not allow_clipped:continue
++        if shape=='sphere' and not clipped and (len(polygon)<6 or circularity<.75):continue
++        if shape=='cube' and not clipped and len(polygon)>6:continue
++        found.append({'area':area,'cx':x+w/2,'cy':y+h/2,'box':(x,y,w,h),
++                      'polygon':polygon[:,0,:].tolist(),'clipped':clipped})
++    return max(found,key=lambda item:item['area']) if found else None
++
++
++def ground(u,v):
++    # Ray/ground intersection from the documented 90-degree HFOV and 0.5 m height.
++    vertical=(240-v)/320;side=(u-320)/320;pitch=math.radians(10)
++    down=math.sin(pitch)-vertical*math.cos(pitch)
++    if down<=.01:return None
++    scale=.5/down
++    return (.27+scale*(math.cos(pitch)+vertical*math.sin(pitch)),scale*side)
++
++
++def distance_from_pixels(item,shape):
++    x,y,w,h=item['box']
++    if item['clipped']:return None
++    if shape=='sphere':
++        elevation=math.atan((240-item['cy'])/320)-math.radians(10)
++        alpha=math.atan(w/640)
++        denominator=math.sin(alpha)-math.sin(elevation)
++        return .27+.5*math.cos(elevation)/denominator if denominator>.01 else None
++    point=ground(item['cx'],y+h)
++    if point is None:return None
++    # Estimate the cube half-width from its projected width at the visible floor edge.
++    return point[0]+w*max(point[0]-.27,0)/640
++
++
++def decide(frame,holding,colour,shape,destination,estimate,travelled):
++    item=detect(frame,destination if holding else colour,None if holding else shape,allow_clipped=estimate is not None)
++    if item is None:return 'turn',{'degrees':45},'TEST ONLY: requested appearance is outside the current view.',None
++    bearing=math.degrees(math.atan((item['cx']-320)/320))
++    note=f"TEST ONLY: {destination if holding else colour} {'floor marking' if holding else shape}, horizontal offset {bearing:.1f} degrees from image centre."
++    # The camera sits ahead of the turn centre: a full image bearing overshoots
++    # nearby items. Use a damped correction and observe again after turning.
++    if estimate is not None:estimate=max(0,estimate-travelled)
++    if abs(bearing)>7:return 'turn',{'degrees':round(max(-45,min(45,bearing*.5)),1)},note,estimate
++    if not holding:
++        measured=distance_from_pixels(item,shape)
++        estimate=measured if measured is not None else estimate
++        if estimate is not None and estimate<=.52:return 'pickup',{},note,estimate
++        if estimate is None:return 'move',{'distance':.1},note,None
++        return 'move',{'distance':round(max(.05,min(.6,estimate-.45)),3)},note,estimate
++    points=[ground(u,v) for u,v in item['polygon']]
++    points=[p for p in points if p is not None]
++    if not item['clipped'] and len(points)>=4:
++        forward=sum(p[0] for p in points)/len(points);right=sum(p[1] for p in points)/len(points)
++        heading=math.degrees(math.atan2(right,forward))
++        if abs(heading)>7:return 'turn',{'degrees':round(heading,1)},note,forward
++        return 'move',{'distance':round(max(.1,min(.5,forward)),3)},note,forward
++    # Continue slowly into a partially visible floor marking; the engine verifies arrival.
++    return 'move',{'distance':.25},note,estimate
++
++
++def run(command,folder,base='http://127.0.0.1:8080'):
++    colour,shape,destination=parse(command)
++    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
++    client=RobotClient(base);client.log_path=folder/'sensor_calls.jsonl'
++    frame=client.call('look');frame_name='step_000.png'
++    Image.open(io.BytesIO(frame)).save(folder/frame_name)
++    estimate=None;travelled=0;have_fresh=True
++    with (folder/'steps.jsonl').open('w',encoding='utf-8') as log:
++        for step in range(1,61):
++            state=client.call('state')
++            if state['state']=='Done':return {'steps':step-1,'stop':'engine_done','dummy':False,'mode':'pixel'}
++            if state['state']=='Blocked':
++                # Existing engine recovery chooses a different angle per retry; do not double it.
++                name,args,note='turn',{'degrees':0},'TEST ONLY: request engine recovery and a fresh view.'
++                estimate=None
++            elif not have_fresh:
++                name,args,note='turn',{'degrees':45},'TEST ONLY: refresh the view after attachment/release.'
++                estimate=None
++            else:
++                name,args,note,estimate=decide(frame,state['holding'],colour,shape,destination,estimate,travelled)
++            result=client.call(name,args)
++            row={'step':step,'timestamp':datetime.now(timezone.utc).isoformat(),'tool':name,
++                 'args':args,'result':result,'frame_path':frame_name if have_fresh else None,'visual_note':note}
++            log.write(json.dumps(row)+'\n');log.flush()
++            print(f"PIXEL TEST {step:02d} {name} {args} -> {result}",flush=True)
++            travelled=abs(result.get('moved',0))
++            if name in ('move','turn'):
++                frame=client.call('look');frame_name=f'step_{step:03d}.png'
++                Image.open(io.BytesIO(frame)).save(folder/frame_name);have_fresh=True
++            else:have_fresh=False;frame_name=None
++        return {'steps':60,'stop':'step_limit','dummy':False,'mode':'pixel'}
+--- /dev/null
++++ b/check_hygiene.py
+@@ -0,0 +1,51 @@
++# Scans repository text for likely credentials without printing their values.
++# A local .env is ignored; a tracked .env is reported as a repository failure.
++import argparse
++import fnmatch
++import re
++import subprocess
++from pathlib import Path
++
++PATTERNS=[re.compile(r'sk-ant-[A-Za-z0-9_-]{20,}'),
++          re.compile(r'sk-(?:proj-)?[A-Za-z0-9_-]{32,}'),
++          re.compile(r'(?i)(?:ANTHROPIC_API_KEY|OPENAI_API_KEY)\s*[:=]\s*[\"\']?([A-Za-z0-9_-]{20,})')]
++
++
++def scan(root):
++    root=Path(root).resolve();failures=[];count=0
++    try:
++        top=subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,text=True,check=True)
++        if Path(top.stdout.strip()).resolve()!=root:raise ValueError('Not the project repository root')
++        result=subprocess.run(['git','-C',str(root),'ls-files','-z'],capture_output=True,check=True)
++        files=[root/name for name in result.stdout.decode().split('\0') if name]
++    except (OSError,ValueError,subprocess.SubprocessError):
++        files=[p for p in root.rglob('*') if p.is_file() and not any(x in p.parts for x in
++            ('.git','.venv','__pycache__','.pytest_cache','logs','submission'))
++            and not p.name.startswith('.env')]
++    for path in files:
++        if path.name=='.env':failures.append(f'{path.relative_to(root)}: tracked credential file')
++        if path.suffix.lower()=='.zip':failures.append(f'{path.relative_to(root)}: archive in repository');continue
++        if path.stat().st_size>2_000_000:continue
++        try:text=path.read_text(encoding='utf-8')
++        except UnicodeError:continue
++        count+=1
++        for number,line in enumerate(text.splitlines(),1):
++            if any(pattern.search(line) for pattern in PATTERNS):
++                failures.append(f'{path.relative_to(root)}:{number}: possible API key (value withheld)')
++    return count,failures
++
++
++def main():
++    parser=argparse.ArgumentParser();parser.add_argument('folder',nargs='?',default=str(Path(__file__).parent))
++    args=parser.parse_args();root=Path(args.folder)
++    ignore=(root/'.gitignore').read_text().splitlines() if (root/'.gitignore').exists() else []
++    ignored=all(p in ignore for p in ('.env','__pycache__/','logs/*','*.zip'))
++    print(('PASS' if ignored else 'FAIL')+' gitignore: .env, caches, logs, ZIPs')
++    count,failures=scan(root)
++    print(('FAIL' if failures else 'PASS')+f' API-key scan: {count} text files')
++    for failure in failures:print('FAIL '+failure)
++    print('Public repository visibility: UNVERIFIED; this script does not publish a repository.')
++    return int(not ignored or bool(failures))
++
++
++if __name__=='__main__':raise SystemExit(main())
+--- /dev/null
++++ b/requirements-pixel.txt
+@@ -0,0 +1,2 @@
++# Optional dependency for the isolated TEST ONLY pixel agent; preserves existing PyBullet.
++opencv-python-headless==4.11.0.86
+--- a/run_command.py
++++ b/run_command.py
+@@ -19,7 +19,9 @@
+ def main():
+     parser=argparse.ArgumentParser()
+     parser.add_argument('command')
+-    parser.add_argument('--dummy',action='store_true')
++    modes=parser.add_mutually_exclusive_group()
++    modes.add_argument('--dummy',action='store_true')
++    modes.add_argument('--pixel',action='store_true',help='TEST ONLY: HTTP pixel controller; never Claude')
+     parser.add_argument('--model',default='claude-sonnet-5-5')
+     parser.add_argument('--gui',action='store_true',help='Show the simulator spectator window')
+     parser.add_argument('--fast',action='store_true',help='Disable real-time pacing for tests')
+@@ -28,8 +30,8 @@
+     parser.add_argument('--no-record-pov',action='store_true',help='Skip recording for quick plumbing tests')
+     args=parser.parse_args()
+     load_dotenv(ROOT/'.env')
+-    if not args.dummy and not os.environ.get('ANTHROPIC_API_KEY','').strip():
+-        parser.error('No ANTHROPIC_API_KEY. Use --dummy now, or set it in your local .env later.')
++    if not args.dummy and not args.pixel and not os.environ.get('ANTHROPIC_API_KEY','').strip():
++        parser.error('No ANTHROPIC_API_KEY. Use --dummy/--pixel now, or set it in your local .env later.')
+     # Never attach to a previously running scene by accident.
+     with socket.socket() as check:
+         try:
+@@ -64,8 +66,13 @@
+                 raise RuntimeError('Engine startup timed out')
+             if args.dummy:
+                 print('DUMMY: fixed script; command is NOT interpreted. This is NOT a vision demo.',flush=True)
+-            result=run(args.command,folder,base=f'http://127.0.0.1:{args.port}',
+-                       dummy=args.dummy,model=args.model)
++            if args.pixel:
++                print('PIXEL AGENT: TEST ONLY. OpenCV pixels, no Claude/API calls.',flush=True)
++                from agent.pixel_agent import run as pixel_run
++                result=pixel_run(args.command,folder,base=f'http://127.0.0.1:{args.port}')
++            else:
++                result=run(args.command,folder,base=f'http://127.0.0.1:{args.port}',
++                           dummy=args.dummy,model=args.model)
+         except Exception as exc:
+             error=f'{type(exc).__name__}: {exc}'
+         finally:
+@@ -78,7 +85,7 @@
+     outcome=evaluation.get('outcome')
+     # Unsupported language isn't silently called correct or a measured failure.
+     verdict='ERROR' if error else ('PASS' if outcome=='pass' else 'UNVERIFIED' if outcome is None else 'FAIL')
+-    summary={**result,'verdict':verdict,'outcome':outcome,'error':error,
++    summary={**result,'mode':'pixel' if args.pixel else 'dummy' if args.dummy else 'claude','verdict':verdict,'outcome':outcome,'error':error,
+              'evaluation':evaluation,'command':args.command}
+     (folder/'summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+     print(json.dumps(summary,indent=2))
+--- /dev/null
++++ b/stretch_goal/report.md
+@@ -0,0 +1,17 @@
++<!-- Separates implemented move/turn planning from unverified live-Claude evidence. -->
++# Stretch goal: visual path planning
++
++Implemented: the Claude tool set is move, turn, pickup, drop and done. There is no
++go_to tool, hidden waypoint planner or object-location endpoint. Claude receives
++camera pixels, the typed instruction, optional single-ray depth, collision feedback,
++permitted robot state and its own visual notes. It chooses move/turn actions.
++
++The engine performs physical collision stops, backoff and bounded recovery turns.
++Those reflex actions are logged separately; they do not choose a route to a named item.
++
++Verified offline: tool-schema checks, HTTP boundary checks and scripted dummy delivery.
++Pixel mode is a separate OpenCV TEST ONLY controller, not evidence of Claude reasoning.
++Live Claude path planning and three successful commands: UNVERIFIED.
++
++package_run.py generates a run-specific report from the actual submitted tool names,
++actions and mode. Mentor review is required before claiming stretch-goal points.
+--- /dev/null
++++ b/tests/test_pixel_agent.py
+@@ -0,0 +1,43 @@
++# Tests pixel-only perception with rendered synthetic images, not scene metadata.
++import ast
++import io
++from pathlib import Path
++import pytest
++from PIL import Image,ImageDraw
++cv2=pytest.importorskip('cv2',reason='Optional pixel dependency not installed')
++from agent.pixel_agent import parse,detect,decide
++
++
++def test_supported_commands_and_rejection():
++    assert parse('Bring the red cube to the green square')==('red','cube','green')
++    assert parse('Bring the round red thing to the green square')==('red','sphere','green')
++    with pytest.raises(ValueError,match='supported'):parse('Bring the tallest object')
++
++
++def test_masks_disambiguate_same_colour_shapes():
++    image=Image.new('RGB',(640,480),(130,130,130));draw=ImageDraw.Draw(image)
++    draw.rectangle((70,180,150,260),fill=(220,0,0))
++    draw.ellipse((390,180,470,260),fill=(220,0,0))
++    data=io.BytesIO();image.save(data,'JPEG')
++    cube=detect(data.getvalue(),'red','cube');sphere=detect(data.getvalue(),'red','sphere')
++    assert cube['cx']<320 and sphere['cx']>320
++    name,args,_,_=decide(data.getvalue(),False,'red','cube','green',None,0)
++    assert name=='turn' and args['degrees']<0
++
++
++def test_pixel_module_cannot_import_scene():
++    source=Path('agent/pixel_agent.py').read_text()
++    for node in ast.walk(ast.parse(source)):
++        if isinstance(node,ast.Import):names=[n.name for n in node.names]
++        elif isinstance(node,ast.ImportFrom):names=[node.module or '']
++        else:continue
++        assert not any(n.split('.')[0] in ('engine','pybullet','scene') for n in names)
++
++
++def test_hygiene_scanner_reports_location_without_secret(tmp_path):
++    from check_hygiene import scan
++    key='sk-'+'ant-'+'a'*30
++    (tmp_path/'bad.py').write_text('key='+repr(key))
++    _,failures=scan(tmp_path)
++    assert failures and 'bad.py:1' in failures[0]
++    assert key not in failures[0]
